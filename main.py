@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", message="builtin type.*has no __module__ attribute")
+
 import pymupdf
 import re
 import json
@@ -103,12 +106,36 @@ def fill_fields(schema, text, current_key=None):
         return {k: fill_fields(v, text, k) for k, v in schema.items()}
     elif isinstance(schema, list):
         # Handle different types of arrays based on context
-        if current_key and "ingredient" in current_key.lower():
-            # This is an ingredients array
+        if current_key and ("ingredient" in current_key.lower() or "chemical" in current_key.lower()):
+            # This is an ingredients/chemicals array
             ingredients = extract_ingredient_data(text)
-            return [{"chemicalName": c.strip(), "casNumber": cas, "weightPercent": w.strip()} 
-                    for c, cas, w in ingredients]
-        elif current_key and "hazardstatement" in current_key.lower():
+            # Check if we have any ingredients to return
+            if ingredients:
+                # Get the first item in the schema to determine the structure
+                if schema and isinstance(schema[0], dict):
+                    # Map ingredient data to the expected schema structure
+                    result = []
+                    for c, cas, w in ingredients:
+                        item = {}
+                        for key, value in schema[0].items():
+                            if "chemical" in key.lower() or "name" in key.lower():
+                                item[key] = c.strip()
+                            elif "cas" in key.lower():
+                                item[key] = cas
+                            elif "weight" in key.lower() or "percent" in key.lower():
+                                item[key] = w.strip()
+                            else:
+                                # For unmapped fields, try to find the value using the mapped key
+                                item[key] = find_value_by_key(value, text) if isinstance(value, str) else None
+                        result.append(item)
+                    return result
+                else:
+                    # If schema structure is unclear, return in default format
+                    return [{"chemicalName": c.strip(), "casNumber": cas, "weightPercent": w.strip()} 
+                            for c, cas, w in ingredients]
+            else:
+                return []
+        elif current_key and "hazard" in current_key.lower():
             # This is a hazard statements array - should be strings
             return find_value_by_key(current_key, text)
         else:

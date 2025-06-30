@@ -6,11 +6,17 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "en-core-web-sm",
+    "psutil>=7.0.0",
     "pymupdf>=1.26.1",
     "spacy>=3.7.2,<3.8.0",
 ]
 
 [tool]
+
+[tool.pytest.ini_options]
+markers = [
+    "performance: marks tests as performance tests (deselect with '-m \"not performance\"')",
+]
 
 [tool.pyrefly]
 project-includes = ["**/*"]
