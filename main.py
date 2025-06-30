@@ -101,47 +101,115 @@ def find_value_by_key(key: str, text: str):
         return statements if statements else []
     return None
 
-def fill_fields(schema, text, current_key=None):
-    if isinstance(schema, dict):
-        return {k: fill_fields(v, text, k) for k, v in schema.items()}
-    elif isinstance(schema, list):
-        # Handle different types of arrays based on context
-        if current_key and ("ingredient" in current_key.lower() or "chemical" in current_key.lower()):
-            # This is an ingredients/chemicals array
-            ingredients = extract_ingredient_data(text)
-            # Check if we have any ingredients to return
-            if ingredients:
-                # Get the first item in the schema to determine the structure
-                if schema and isinstance(schema[0], dict):
-                    # Map ingredient data to the expected schema structure
-                    result = []
-                    for c, cas, w in ingredients:
-                        item = {}
-                        for key, value in schema[0].items():
-                            if "chemical" in key.lower() or "name" in key.lower():
-                                item[key] = c.strip()
-                            elif "cas" in key.lower():
-                                item[key] = cas
-                            elif "weight" in key.lower() or "percent" in key.lower():
-                                item[key] = w.strip()
-                            else:
-                                # For unmapped fields, try to find the value using the mapped key
-                                item[key] = find_value_by_key(value, text) if isinstance(value, str) else None
-                        result.append(item)
-                    return result
+def _is_ingredient_related(key):
+    """Check if a key is related to ingredients/chemicals"""
+    if not key:
+        return False
+    key_lower = key.lower()
+    return any(term in key_lower for term in [
+        'ingredient', 'chemical', 'component', 'substance', 'compound'
+    ])
+
+def _is_hazard_related(key):
+    """Check if a key is related to hazards"""
+    if not key:
+        return False
+    key_lower = key.lower()
+    return any(term in key_lower for term in [
+        'hazard', 'danger', 'warning', 'statement', 'risk'
+    ])
+
+def _map_ingredient_data(ingredients, schema_item, text=""):
+    """Map ingredient data to the expected schema structure"""
+    if not ingredients:
+        return []
+    
+    result = []
+    for chemical, cas, weight in ingredients:
+        item = {}
+        
+        if isinstance(schema_item, dict):
+            for key, value in schema_item.items():
+                key_lower = key.lower()
+                if any(term in key_lower for term in ['chemical', 'name', 'substance']):
+                    item[key] = chemical.strip()
+                elif any(term in key_lower for term in ['cas', 'number', 'registry']):
+                    item[key] = cas
+                elif any(term in key_lower for term in ['weight', 'percent', 'concentration', 'amount']):
+                    item[key] = weight.strip()
                 else:
-                    # If schema structure is unclear, return in default format
-                    return [{"chemicalName": c.strip(), "casNumber": cas, "weightPercent": w.strip()} 
-                            for c, cas, w in ingredients]
-            else:
-                return []
-        elif current_key and "hazard" in current_key.lower():
-            # This is a hazard statements array - should be strings
-            return find_value_by_key(current_key, text)
+                    # For unmapped fields, try to find the value using the mapped key
+                    item[key] = find_value_by_key(value, text) if isinstance(value, str) else None
         else:
-            # Default case for unknown arrays
+            # Default structure if schema_item is not a dict
+            item = {"chemicalName": chemical.strip(), "casNumber": cas, "weightPercent": weight.strip()}
+        
+        result.append(item)
+    
+    return result
+
+def _get_array_data(schema, text, current_key):
+    """Get appropriate data for array fields based on context"""
+    # Determine array type based on key name and schema structure
+    if _is_ingredient_related(current_key):
+        ingredients = extract_ingredient_data(text)
+        return _map_ingredient_data(ingredients, schema[0] if schema else None, text)
+    
+    elif _is_hazard_related(current_key):
+        hazard_data = find_value_by_key(current_key, text)
+        # Ensure we always return a list for hazard arrays
+        if hazard_data is None:
             return []
+        elif isinstance(hazard_data, list):
+            return hazard_data
+        else:
+            return [hazard_data] if hazard_data else []
+    
     else:
+        # For other array types, try to infer based on schema structure
+        if schema and isinstance(schema[0], dict):
+            # If it's an array of objects, check if any keys suggest ingredient data
+            schema_keys = list(schema[0].keys())
+            has_ingredient_keys = any(_is_ingredient_related(key) for key in schema_keys)
+            has_hazard_keys = any(_is_hazard_related(key) for key in schema_keys)
+            
+            if has_ingredient_keys:
+                ingredients = extract_ingredient_data(text)
+                return _map_ingredient_data(ingredients, schema[0], text)
+            elif has_hazard_keys:
+                hazard_data = find_value_by_key('hazardStatements', text)
+                if isinstance(hazard_data, list):
+                    return [schema[0] for _ in hazard_data] if hazard_data else []
+                return []
+        
+        # Default: return empty array
+        return []
+
+def fill_fields(schema, text, current_key=None):
+    """
+    Dynamically fill schema fields with extracted text data.
+    
+    Args:
+        schema: The schema structure (dict, list, or string)
+        text: The text to extract data from
+        current_key: The current key being processed (for context)
+    
+    Returns:
+        Filled data structure matching the schema
+    """
+    if isinstance(schema, dict):
+        # Recursively process dictionary fields
+        result = {}
+        for key, value in schema.items():
+            result[key] = fill_fields(value, text, key)
+        return result
+    
+    elif isinstance(schema, list):
+        # Handle array fields
+        return _get_array_data(schema, text, current_key)
+    
+    else:
+        # Handle primitive fields (strings)
         return find_value_by_key(schema, text)
 
 def main():
@@ -152,7 +220,7 @@ def main():
     schema = parse_ts_interface(ts_code)
 
     # 2. Extract text from PDF
-    doc = pymupdf.open("sample.pdf")
+    doc = pymupdf.open("samples/sample.pdf")
     text = "\n".join(page.get_text() for page in doc)
 
     # 3. Fill schema
