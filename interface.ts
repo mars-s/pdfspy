@@ -4,9 +4,9 @@ interface SDSData {
     signalWord: string;
     hazardStatements: string[];
   };
-  ingredients: {
-    chemicalName: string;
-    casNumber: string;
-    weightPercent: string;
+  substances: {
+    component: string;
+    CAS: string;
+    REACH_registration_number: string;
   }[];
 }
