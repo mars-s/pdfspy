@@ -1,0 +1,16 @@
+{
+  "timestamp": "2025-06-30T21:56:59.830413",
+  "summary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "success_rate": 0.0
+  },
+  "results": {
+    "smoke_tests": {
+      "return_code": -1,
+      "error": "[Errno 2] No such file or directory: 'python'",
+      "success": false
+    }
+  }
+}
