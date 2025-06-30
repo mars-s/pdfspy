@@ -18,3 +18,8 @@ project-excludes = ["**/*venv/**/*"]
 
 [tool.uv.sources]
 en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl" }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.1",
+]

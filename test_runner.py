@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python33
 """
 Test Runner Script for PDF Scrapper
 Provides various test execution options and reporting
@@ -24,44 +24,44 @@ class TestRunner:
     def run_basic_tests(self):
         """Run basic functionality tests"""
         print("🧪 Running Basic Tests...")
-        cmd = ["python", "-m", "pytest", "test_pdf_scrapper.py::TestInterfaceVariations", "-v"]
+        cmd = ["uv", "run", "python", "-m", "pytest", "tests/test_pdf_scrapper.py::TestInterfaceVariations", "-v"]
         return self._run_pytest_command(cmd, "basic_tests")
     
     def run_performance_tests(self):
         """Run performance tests"""
         print("⚡ Running Performance Tests...")
-        cmd = ["python", "-m", "pytest", "test_performance_edge_cases.py", "-m", "performance", "-v"]
+        cmd = ["uv", "run", "python", "-m", "pytest", "tests/test_performance_edge_cases.py", "-m", "performance", "-v"]
         return self._run_pytest_command(cmd, "performance_tests")
     
     def run_edge_case_tests(self):
         """Run edge case tests"""
         print("🔍 Running Edge Case Tests...")
-        cmd = ["python", "-m", "pytest", "test_performance_edge_cases.py::TestEdgeCasesAndErrorHandling", "-v"]
+        cmd = ["uv", "run", "python", "-m", "pytest", "tests/test_performance_edge_cases.py::TestEdgeCasesAndErrorHandling", "-v"]
         return self._run_pytest_command(cmd, "edge_case_tests")
     
     def run_consistency_tests(self):
         """Run consistency and determinism tests"""
         print("🔄 Running Consistency Tests...")
-        cmd = ["python", "-m", "pytest", "test_pdf_scrapper.py::TestConsistencyAndDeterminism", "-v"]
+        cmd = ["uv", "run", "python", "-m", "pytest", "tests/test_pdf_scrapper.py::TestConsistencyAndDeterminism", "-v"]
         return self._run_pytest_command(cmd, "consistency_tests")
     
     def run_all_tests(self):
         """Run all tests"""
         print("🚀 Running All Tests...")
-        cmd = ["python", "-m", "pytest", "-v", "--tb=short"]
+        cmd = ["uv", "run", "python", "-m", "pytest", "-v", "--tb=short"]
         return self._run_pytest_command(cmd, "all_tests")
     
     def run_smoke_tests(self):
         """Run quick smoke tests"""
         print("💨 Running Smoke Tests...")
-        cmd = ["python", "-m", "pytest", "-v", "-x", "--tb=line", 
-               "test_pdf_scrapper.py::TestInterfaceVariations::test_original_interface"]
+        cmd = ["uv", "run", "python", "-m", "pytest", "-v", "-x", "--tb=line", 
+               "tests/test_pdf_scrapper.py::TestInterfaceVariations::test_original_interface"]
         return self._run_pytest_command(cmd, "smoke_tests")
     
     def run_interface_variation_tests(self):
         """Run tests for different interface variations"""
         print("🔧 Running Interface Variation Tests...")
-        cmd = ["python", "-m", "pytest", "test_performance_edge_cases.py::TestInterfaceVariationsExtensive", "-v"]
+        cmd = ["uv", "run", "python", "-m", "pytest", "tests/test_performance_edge_cases.py::TestInterfaceVariationsExtensive", "-v"]
         return self._run_pytest_command(cmd, "interface_variation_tests")
     
     def _run_pytest_command(self, cmd, test_type):
@@ -250,7 +250,7 @@ def main():
     if args.generate_coverage:
         print("\n📈 Generating Coverage Report...")
         try:
-            subprocess.run(["python", "-m", "pytest", "--cov=main", "--cov-report=html"], 
+            subprocess.run(["python3", "-m", "pytest", "--cov=main", "--cov-report=html"], 
                           capture_output=True, text=True)
             print("📊 Coverage report generated in htmlcov/")
         except Exception as e:

@@ -1,4 +1,4 @@
-import fitz
+import pymupdf
 import re
 import json
 from parse_ts_interface import parse_ts_interface
@@ -125,7 +125,7 @@ def main():
     schema = parse_ts_interface(ts_code)
 
     # 2. Extract text from PDF
-    doc = fitz.open("sample.pdf")
+    doc = pymupdf.open("sample.pdf")
     text = "\n".join(page.get_text() for page in doc)
 
     # 3. Fill schema
