@@ -92,15 +92,58 @@ def _generate_field_variants(field_name: str) -> List[str]:
         field_name.upper(),
         field_name.replace('_', ' '),
         field_name.replace('-', ' '),
+        field_name.replace('_', '-'),  # underscore to dash
+        field_name.replace(' ', '-'),  # space to dash
         re.sub(r'([a-z])([A-Z])', r'\1-\2', field_name).lower(),  # kebab-case
         re.sub(r'([a-z])([A-Z])', r'\1_\2', field_name).lower(),  # snake_case
     ])
+    
+    # Special handling for common field patterns
+    field_lower = field_name.lower()
+    
+    # CAS number variants
+    if 'cas' in field_lower:
+        cas_variants = ['CAS-No', 'cas-no', 'CAS No', 'cas no', 'CAS Number', 'cas number', 
+                       'CASNO', 'casno', 'CAS_No', 'cas_no', 'CAS.No', 'cas.no']
+        if 'no' in field_lower or 'number' in field_lower:
+            cas_variants.extend(['Registration No', 'Reg No', 'Registry Number', 'REACH Registration'])
+        variants.extend(cas_variants)
+    
+    # Chemical/Component name variants
+    if ('chemical' in field_lower or 'component' in field_lower) and 'name' in field_lower:
+        name_variants = ['Chemical Name', 'chemical name', 'CHEMICAL NAME', 'Component', 
+                        'component', 'COMPONENT', 'Component Name', 'Substance Name', 
+                        'substance name', 'Material Name', 'material name']
+        variants.extend(name_variants)
+    
+    # Product name variants  
+    if 'product' in field_lower and 'name' in field_lower:
+        product_variants = ['Product Name', 'product name', 'PRODUCT NAME', 'Product', 
+                           'product', 'PRODUCT', 'Trade Name', 'trade name', 'Commercial Name']
+        variants.extend(product_variants)
+    
+    # EC number variants
+    if 'ec' in field_lower and ('no' in field_lower or 'number' in field_lower):
+        ec_variants = ['EC-No', 'ec-no', 'EC No', 'ec no', 'EC Number', 'ec number',
+                      'ECNO', 'ecno', 'EC_No', 'ec_no', 'European Community Number']
+        variants.extend(ec_variants)
+    
+    # Weight/percentage variants
+    if 'weight' in field_lower:
+        weight_variants = ['Weight %', 'weight %', 'WEIGHT %', 'Weight Percent', 
+                          'Wt %', 'wt %', 'WT %', 'Concentration', 'concentration']
+        variants.extend(weight_variants)
     
     return list(set(filter(None, variants)))
 
 
 def _extract_with_optimized_patterns(field_variants: List[str], text: str) -> Optional[str]:
     """Extract value using optimized regex patterns with field variants."""
+    
+    # First, try table-aware extraction for structured data
+    table_value = _extract_from_table_structure(field_variants, text)
+    if table_value:
+        return table_value
     
     for variant in field_variants:
         # Multiple pattern strategies with priority order
@@ -257,20 +300,56 @@ def _score_extraction_context(match, text: str, field_name: str) -> float:
     start = max(0, match.start() - 100)
     end = min(len(text), match.end() + 100)
     context = text[start:end]
+    extracted_value = match.group(1).strip()
+    
+    # Heavily penalize if the extracted value is just the field name or a header
+    if extracted_value.lower() == field_name.lower():
+        return 0.1
+    
+    # Penalize common header words more strongly
+    header_indicators = ['component', 'ec-no', 'cas-no', 'weight', 'classification', 'range', 'number', 'no', 'ec', 'cas']
+    if extracted_value.lower() in header_indicators:
+        return 0.05  # Very low score for headers
+    
+    # Penalize short values that look like headers
+    if len(extracted_value) <= 5 and any(char in extracted_value for char in ['-', '.']):
+        return 0.1
     
     # Positive indicators
     if ':' in context[:match.start()-start+10]:  # Colon before field
         score += 0.2
     if re.search(r'\b(value|amount|quantity|weight|percentage)\b', context, re.IGNORECASE):
         score += 0.2
-    if len(match.group(1).strip()) > 3:  # Reasonable value length
+    if len(extracted_value) > 3:  # Reasonable value length
         score += 0.1
+    
+    # Special scoring for different field types
+    field_lower = field_name.lower()
+    if 'cas' in field_lower:
+        # For CAS numbers, look for the characteristic pattern
+        if re.search(r'\d{2,7}-\d{2}-\d', extracted_value):
+            score += 0.4
+        elif re.match(r'^\d+$', extracted_value):  # Just numbers, less likely
+            score += 0.1
+    elif 'chemical' in field_lower or 'name' in field_lower:
+        # For chemical names, prefer text over numbers and give bonus for chemical-sounding words
+        if not re.match(r'^\d+[-\d]*$', extracted_value):
+            score += 0.3
+        # Bonus for chemical-sounding words
+        chemical_words = ['sodium', 'hydrogen', 'carbonate', 'acid', 'oxide', 'chloride', 'sulfate', 'phosphate']
+        if any(word in extracted_value.lower() for word in chemical_words):
+            score += 0.4
+        # Bonus for longer names (chemical names are typically longer)
+        if len(extracted_value) > 10:
+            score += 0.2
     
     # Negative indicators
     if re.search(r'\b(title|header|caption|label)\b', context, re.IGNORECASE):
         score -= 0.3
-    if match.group(1).strip().endswith(':'):  # Value ends with colon (likely a label)
+    if extracted_value.endswith(':'):  # Value ends with colon (likely a label)
         score -= 0.4
+    if len(extracted_value) <= 2:  # Too short to be meaningful
+        score -= 0.3
     
     return max(0, min(1, score))
 
@@ -486,40 +565,130 @@ def _extract_structured_array(text: str, schema: Dict[str, Any]) -> List[Dict[st
 
 
 def _extract_table_data(text: str, field_names: List[str]) -> List[Dict[str, Any]]:
-    """Extract data from table-like structures in text."""
+    """Extract data from table-like structures in text with improved header detection."""
     lines = text.split('\n')
     table_rows = []
     
     # Look for table headers
     header_indices = {}
+    header_line_idx = None
+    
     for i, line in enumerate(lines):
-        line_lower = line.lower()
+        line_lower = line.lower().strip()
         field_matches = 0
+        temp_header_indices = {}
         
         for field in field_names:
             field_variants = _generate_field_variants(field)
             for variant in field_variants:
-                if variant.lower() in line_lower:
+                variant_lower = variant.lower()
+                if variant_lower in line_lower:
                     field_matches += 1
                     # Try to find column position
-                    col_pos = line_lower.find(variant.lower())
-                    header_indices[field] = col_pos
+                    col_pos = line_lower.find(variant_lower)
+                    temp_header_indices[field] = col_pos
                     break
         
         # If we found most fields in this line, it's likely a header
         if field_matches >= len(field_names) * 0.6:  # 60% of fields found
-            # Extract data rows following this header
-            for j in range(i + 1, min(i + 20, len(lines))):  # Check next 20 lines
-                data_line = lines[j].strip()
-                if data_line and not data_line.lower().startswith(tuple(field_names)):
-                    row_data = _parse_table_row(data_line, header_indices, field_names)
-                    if row_data and len(row_data) >= 2:
-                        table_rows.append(row_data)
-            
-            if table_rows:
-                return table_rows[:15]  # Return first 15 valid rows
+            header_indices = temp_header_indices
+            header_line_idx = i
+            break
+    
+    # If we found headers, look for structured data following them
+    if header_line_idx is not None:
+        # For vertical table structure (headers followed by data rows)
+        data_rows = _extract_vertical_table_data(lines, header_line_idx, field_names, header_indices)
+        if data_rows:
+            return data_rows
+        
+        # For horizontal table structure (headers and data on same conceptual row)
+        data_rows = _extract_horizontal_table_data(lines, header_line_idx, field_names, header_indices)
+        if data_rows:
+            return data_rows
     
     return []
+
+
+def _extract_vertical_table_data(lines: List[str], header_idx: int, field_names: List[str], header_indices: Dict[str, int]) -> List[Dict[str, Any]]:
+    """Extract data from vertical table structure where headers are followed by data rows."""
+    table_rows = []
+    
+    # Look for data in the lines following the header
+    data_start_idx = header_idx + 1
+    
+    # Skip any additional header lines (like classification headers, etc.)
+    while data_start_idx < len(lines) and data_start_idx < header_idx + 10:
+        line = lines[data_start_idx].strip()
+        if (line and 
+            not any(header_word in line.lower() for header_word in ['component', 'classification', 'range', 'weight', 'ec-no', 'cas-no', 'reach', 'registration', 'number']) and
+            not re.match(r'^\(\d+.*\)$', line)):  # Skip things like (67/548)
+            break
+        data_start_idx += 1
+    
+    # Now look for the actual data - for the SDS case, we expect the chemical name and CAS number
+    current_row = {}
+    
+    for i in range(data_start_idx, min(data_start_idx + 20, len(lines))):
+        line = lines[i].strip()
+        if not line:
+            if current_row and len(current_row) >= 2:  # Save complete row
+                # Fill in missing fields
+                for field in field_names:
+                    if field not in current_row:
+                        current_row[field] = ""
+                table_rows.append(current_row)
+                current_row = {}
+            continue
+        
+        # Try to identify what type of data this line contains
+        if re.search(r'\b\d{2,7}-\d{2}-\d\b', line):  # CAS number pattern
+            # Find CAS field by looking for 'cas' in field name
+            cas_field = next((field for field in field_names if 'cas' in field.lower()), None)
+            if cas_field:
+                cas_match = re.search(r'\b\d{2,7}-\d{2}-\d\b', line)
+                current_row[cas_field] = cas_match.group()
+        
+        elif re.search(r'\b\d{3}-\d{3}-\d\b', line):  # EC number pattern
+            # This is likely EC number, skip for now
+            continue
+            
+        elif (not re.match(r'^\d+[-\d\s%]*$', line) and  # Not just numbers/percentages
+              len(line) > 3 and
+              not any(skip_word in line.lower() for skip_word in ['classification', 'reach', 'registration', 'number'])):
+            # This looks like a chemical name - find name field by looking for chemical/component/name
+            name_field = next((field for field in field_names 
+                             if any(pattern in field.lower() for pattern in ['chemical', 'component', 'substance', 'material']) 
+                             and 'product' not in field.lower()), None)
+            if name_field and name_field not in current_row:
+                current_row[name_field] = line
+    
+    # Don't forget the last row
+    if current_row and len(current_row) >= 2:
+        for field in field_names:
+            if field not in current_row:
+                current_row[field] = ""
+        table_rows.append(current_row)
+    
+    return table_rows[:5]  # Limit results
+
+
+def _extract_horizontal_table_data(lines: List[str], header_idx: int, field_names: List[str], header_indices: Dict[str, int]) -> List[Dict[str, Any]]:
+    """Extract data from horizontal table structure (traditional table with columns)."""
+    table_rows = []
+    
+    # Extract data rows following the header
+    for j in range(header_idx + 1, min(header_idx + 20, len(lines))):
+        data_line = lines[j].strip()
+        if data_line and not data_line.lower().startswith(tuple(fn.lower() for fn in field_names)):
+            row_data = _parse_table_row(data_line, header_indices, field_names)
+            if row_data and len(row_data) >= 2:
+                table_rows.append(row_data)
+    
+    return table_rows[:15]  # Return first 15 valid rows
+
+
+
 
 
 def _parse_table_row(line: str, header_indices: Dict[str, int], field_names: List[str]) -> Dict[str, Any]:
@@ -655,6 +824,85 @@ def _get_default_value(field_type: str) -> Any:
         'string': ""
     }
     return defaults.get(field_type, "")
+
+
+def _extract_from_table_structure(field_variants: List[str], text: str) -> Optional[str]:
+    """
+    Extract values from table-like structures by identifying headers and corresponding data rows.
+    This handles cases where headers and data are on separate lines.
+    """
+    lines = text.split('\n')
+    
+    for variant in field_variants:
+        variant_lower = variant.lower()
+        
+        # Find lines that contain our field variant (likely headers)
+        for i, line in enumerate(lines):
+            line_lower = line.lower().strip()
+            
+            # Check if this line contains our field variant as a header
+            if (variant_lower in line_lower and 
+                len(line_lower) <= len(variant_lower) + 10 and  # Likely a header, not descriptive text
+                not re.search(r'[:=]', line)):  # No immediate value separator
+                
+                # Look for corresponding data in subsequent lines
+                # For table structures, data is usually within the next 10-15 lines
+                for j in range(i + 1, min(i + 15, len(lines))):
+                    candidate_line = lines[j].strip()
+                    
+                    if candidate_line and _is_valid_data_candidate(candidate_line, variant):
+                        # Check if this looks like the data we want
+                        if variant_lower == 'cas-no' or 'cas' in variant_lower:
+                            # For CAS numbers, look for the characteristic pattern XXX-XX-X
+                            cas_match = re.search(r'\b\d{2,7}-\d{2}-\d\b', candidate_line)
+                            if cas_match:
+                                return cas_match.group()
+                        
+                        elif variant_lower == 'ec-no' or ('ec' in variant_lower and ('no' in variant_lower or 'number' in variant_lower)):
+                            # For EC numbers, look for the characteristic pattern XXX-XXX-X
+                            ec_match = re.search(r'\b\d{3}-\d{3}-\d\b', candidate_line)
+                            if ec_match:
+                                return ec_match.group()
+                        
+                        elif 'chemical' in variant_lower or 'component' in variant_lower or 'name' in variant_lower:
+                            # For chemical names, look for text that's not numbers/codes
+                            if (not re.match(r'^\d+[-\d]*$', candidate_line) and 
+                                len(candidate_line) > 3 and 
+                                not candidate_line.lower() in ['component', 'ec-no', 'cas-no', 'weight']):
+                                return candidate_line
+                        
+                        else:
+                            # For other fields, return first reasonable candidate
+                            if len(candidate_line) > 1 and candidate_line != variant:
+                                return candidate_line
+    
+    return None
+
+
+def _is_valid_data_candidate(line: str, field_variant: str) -> bool:
+    """
+    Check if a line is a valid data candidate (not a header or noise).
+    """
+    line_lower = line.lower().strip()
+    field_lower = field_variant.lower()
+    
+    # Skip obvious headers
+    if line_lower in ['component', 'ec-no', 'cas-no', 'weight %', 'weight', 'classification', 'range']:
+        return False
+    
+    # Skip lines that are just the field name
+    if line_lower == field_lower:
+        return False
+    
+    # Skip very short lines unless they look like codes
+    if len(line_lower) < 2:
+        return False
+    
+    # Skip lines that look like section headers
+    if re.match(r'^\d+\.', line_lower):
+        return False
+    
+    return True
 
 
 
