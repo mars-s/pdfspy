@@ -27,7 +27,7 @@ class FastDonutProcessor:
         print(f"Using device: {self.device}")
         
         try:
-            self.processor = DonutProcessor.from_pretrained(model_name)
+            self.processor = DonutProcessor.from_pretrained(model_name, use_fast=False)
             self.model = VisionEncoderDecoderModel.from_pretrained(model_name)
             self.model.to(self.device)
 
@@ -100,12 +100,14 @@ class FastDonutProcessor:
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     pixel_values,
-                    max_length=512,
-                    num_beams=1,  # Faster than beam search
+                    max_length=2048,  # Increased for more text
+                    num_beams=3,      # Increased for better quality
                     do_sample=False,
                     early_stopping=True,
                     pad_token_id=self.processor.tokenizer.pad_token_id,
                     eos_token_id=self.processor.tokenizer.eos_token_id,
+                    repetition_penalty=1.2,  # Reduce repetition
+                    length_penalty=1.0,      # Neutral length preference
                 )
 
             # Check timeout after generation

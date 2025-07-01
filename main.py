@@ -382,7 +382,7 @@ Examples:
             
             result = processor.process_single_pdf(pdf_input_path, interface_path)
         
-        # Output results
+        # Output results - show only interface-matched data
         if args.output:
             output_path = Path(args.output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -390,7 +390,13 @@ Examples:
                 json.dump(result, f, indent=2, ensure_ascii=False)
             print(f"Results saved to: {output_path}")
         else:
-            print(json.dumps(result, indent=2, ensure_ascii=False))
+            # Only show the extracted data that matches the interface, not metadata or chemical_analysis
+            if 'extracted_data' in result:
+                clean_data = {k: v for k, v in result['extracted_data'].items() 
+                            if k != 'chemical_analysis'}
+                print(json.dumps(clean_data, indent=2, ensure_ascii=False))
+            else:
+                print(json.dumps(result, indent=2, ensure_ascii=False))
         
         # Print summary
         total_time = time.time() - start_time

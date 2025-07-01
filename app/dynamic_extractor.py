@@ -1,664 +1,916 @@
 """
-High-performance dynamic field extraction using rapidfuzz and chemical NER.
-Efficiently extracts values for TypeScript interface fields from PDF text.
+Modern Dynamic Field Extraction System with Donut-First Architecture
+Prioritizes Donut for structured document understanding, falls back to intelligent NLP extraction.
+All field searching is completely dynamic based on TypeScript interface structure.
 """
 import re
-from typing import Dict, Any, List, Optional, Union
+import json
+from typing import Dict, Any, List, Optional, Union, Tuple
 from functools import lru_cache
+import rapidfuzz
+from dataclasses import dataclass
 
-# Import optimized libraries
+# Import modules
+from .parse_ts_interface import parse_ts_interface, get_all_field_names, get_field_search_terms
+from .donut_processor import FastDonutProcessor, DONUT_AVAILABLE
+
+# Optional NLP imports with graceful fallback
 try:
-    import rapidfuzz
-    from rapidfuzz import fuzz, process
-    RAPIDFUZZ_AVAILABLE = True
+    import spacy
+    from spacy.matcher import Matcher
+    NLP_AVAILABLE = True
 except ImportError:
-    RAPIDFUZZ_AVAILABLE = False
-    print("Warning: rapidfuzz not available. Install with: pip install rapidfuzz")
-
-# Import chemical NER and related modules
-try:
-    from .chemical_ner import ChemicalNER
-    from .hazard_classifier import HazardClassifier
-    CHEMICAL_NER_AVAILABLE = True
-except ImportError:
-    CHEMICAL_NER_AVAILABLE = False
-    print("Warning: Chemical NER modules not available")
-
-# Import interface parser
-from .parse_ts_interface import parse_ts_interface, get_field_search_terms
-
-# Pre-compile common chemical patterns for fast matching
-CHEMICAL_PATTERNS = {
-    'cas_number': re.compile(r'\b\d{2,7}-\d{2}-\d\b'),
-    'ec_number': re.compile(r'\b\d{3}-\d{3}-\d\b'),
-    'reach_number': re.compile(r'\b\d{2}-\d{10}-\d{2}-[a-zA-Z0-9]\b'),
-    'hazard_code': re.compile(r'\bH\d{3}\b'),
-    'precautionary_code': re.compile(r'\bP\d{3}\b'),
-    'signal_word': re.compile(r'\b(DANGER|WARNING|CAUTION)\b', re.IGNORECASE),
-    'pictogram': re.compile(r'GHS\d{2}', re.IGNORECASE),
-    'concentration': re.compile(r'\d+(?:\.\d+)?\s*%'),
-    'temperature': re.compile(r'\d+(?:\.\d+)?\s*°?C'),
-    'molecular_formula': re.compile(r'\b[A-Z][a-z]?\d*(?:[A-Z][a-z]?\d*)*\b'),
-    'phone_number': re.compile(r'[\+]?[\d\s\-\(\)]{10,}'),
-    'email': re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
-    'date': re.compile(r'\b\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}\b'),
-    'url': re.compile(r'https?://[^\s]+'),
-}
-
-# Cache for performance optimization
-_extraction_cache = {}
-_max_cache_size = 1000
-
-# Initialize chemical processors if available
-chemical_ner = ChemicalNER() if CHEMICAL_NER_AVAILABLE else None
-hazard_classifier = HazardClassifier() if CHEMICAL_NER_AVAILABLE else None
+    NLP_AVAILABLE = False
 
 
-@lru_cache(maxsize=1000)
-def fuzzy_match_field(field_name: str, text_chunk: str, threshold: int = 80) -> bool:
-    """Fast fuzzy matching with caching"""
-    if not RAPIDFUZZ_AVAILABLE:
-        return field_name.lower() in text_chunk.lower()
-    
-    return fuzz.partial_ratio(field_name.lower(), text_chunk.lower()) > threshold
+@dataclass
+class ExtractionConfig:
+    """Configuration for extraction behavior."""
+    donut_timeout: int = 15
+    donut_max_length: int = 2048
+    use_nlp_fallback: bool = True
+    confidence_threshold: float = 0.7
+    max_extraction_attempts: int = 3
 
 
-def extract_field_value(field_name: str, text: str, interface_schema: Dict[str, Any], field_path: str = "") -> Any:
+@dataclass
+class ExtractionResult:
+    """Result of field extraction with metadata."""
+    data: Dict[str, Any]
+    confidence: float
+    method_used: str
+    processing_time: float
+    field_count: int
+    errors: List[str]
+
+
+class DynamicExtractor:
     """
-    Extract a field value from text using TypeScript interface schema for intelligent matching.
+    Modern dynamic extractor that adapts to any interface structure.
+    Uses Donut for visual document understanding, NLP for intelligent text processing.
+    """
     
-    Args:
-        field_name: The field name from TypeScript interface
-        text: The PDF text to search in  
-        interface_schema: Parsed TypeScript interface schema
-        field_path: Path to the field in nested objects (e.g., "identification.productName")
+    def __init__(self, config: Optional[ExtractionConfig] = None):
+        """Initialize the dynamic extractor."""
+        self.config = config or ExtractionConfig()
+        self.donut_processor = None
+        self.nlp_model = None
+        self.field_matchers = {}
+        self._extraction_cache = {}
         
-    Returns:
-        Extracted value or None if not found
-    """
-    # Check cache first
-    cache_key = f"{field_path or field_name}:{hash(text[:1000])}"
-    if cache_key in _extraction_cache:
-        return _extraction_cache[cache_key]
+        # Initialize components
+        self._init_donut()
+        self._init_nlp()
     
-    # Get field metadata from schema
-    field_info = _get_field_info_from_schema(interface_schema, field_name, field_path)
-    if not field_info:
-        # Fallback to basic extraction without schema
-        _cache_result(cache_key, None)
-        return None
+    def _init_donut(self) -> None:
+        """Initialize Donut processor if available."""
+        if DONUT_AVAILABLE:
+            try:
+                self.donut_processor = FastDonutProcessor()
+                print("✅ Donut processor initialized successfully")
+            except Exception as e:
+                print(f"⚠️ Donut initialization failed: {e}")
+                self.donut_processor = None
+        else:
+            print("❌ Donut not available - install transformers, torch, and dependencies")
     
-    field_type = field_info.get("_type", "string")
-    search_terms = field_info.get("_search_terms", [field_name])
-    priority = field_info.get("_priority", 1)
+    def _init_nlp(self) -> None:
+        """Initialize NLP model if available."""
+        if NLP_AVAILABLE and self.config.use_nlp_fallback:
+            try:
+                # Try to load transformer model first (best accuracy), then fallback
+                model_names = ["en_core_web_trf", "en_core_web_sm", "en_core_web_md", "en"]
+                for model_name in model_names:
+                    try:
+                        self.nlp_model = spacy.load(model_name)
+                        print(f"✅ NLP model '{model_name}' loaded successfully")
+                        break
+                    except OSError:
+                        continue
+                        
+                if not self.nlp_model:
+                    print("⚠️ No spaCy model found - install with: python -m spacy download en_core_web_trf")
+                    
+            except Exception as e:
+                print(f"⚠️ NLP initialization failed: {e}")
+                self.nlp_model = None
+        else:
+            print("❌ NLP not available or disabled")
     
-    # Step 1: Chemical-specific extraction (highest priority for chemical data)
-    if chemical_ner and _is_chemical_field_from_schema(field_info, search_terms):
-        chemical_value = _extract_chemical_field_from_schema(field_info, search_terms, text, field_type)
-        if chemical_value is not None:
-            _cache_result(cache_key, chemical_value)
-            return chemical_value
+    def extract_from_pdf(self, pdf_path: str, interface_schema: Dict[str, Any], 
+                        page_num: int = 0) -> ExtractionResult:
+        """
+        Extract fields from PDF using Donut-first approach.
+        
+        Args:
+            pdf_path: Path to PDF file
+            interface_schema: Parsed TypeScript interface schema
+            page_num: Page number to process (0-indexed)
+            
+        Returns:
+            ExtractionResult with extracted data and metadata
+        """
+        import time
+        start_time = time.time()
+        errors = []
+        
+        print(f"🚀 Starting extraction from PDF: {pdf_path} (page {page_num})")
+        
+        # Attempt 1: Donut extraction (primary method)
+        donut_result = self._extract_with_donut(pdf_path, interface_schema, page_num)
+        
+        if donut_result and self._is_high_quality_result(donut_result, interface_schema):
+            processing_time = time.time() - start_time
+            print(f"✅ High-quality Donut extraction completed in {processing_time:.2f}s")
+            return ExtractionResult(
+                data=donut_result,
+                confidence=0.9,
+                method_used="donut",
+                processing_time=processing_time,
+                field_count=self._count_fields(donut_result),
+                errors=errors
+            )
+        
+        # Attempt 2: Enhanced Donut + NLP hybrid
+        print("🔄 Attempting enhanced Donut + NLP hybrid extraction...")
+        hybrid_result = self._extract_hybrid(pdf_path, interface_schema, page_num, donut_result)
+        
+        if hybrid_result and self._is_adequate_result(hybrid_result, interface_schema):
+            processing_time = time.time() - start_time
+            print(f"✅ Hybrid extraction completed in {processing_time:.2f}s")
+            return ExtractionResult(
+                data=hybrid_result,
+                confidence=0.8,
+                method_used="hybrid_donut_nlp",
+                processing_time=processing_time,
+                field_count=self._count_fields(hybrid_result),
+                errors=errors
+            )
+        
+        # Attempt 3: Pure NLP extraction (fallback)
+        print("🔄 Falling back to pure NLP extraction...")
+        nlp_result = self._extract_with_nlp(pdf_path, interface_schema, page_num)
+        
+        processing_time = time.time() - start_time
+        print(f"✅ NLP extraction completed in {processing_time:.2f}s")
+        
+        return ExtractionResult(
+            data=nlp_result or self._create_empty_result(interface_schema),
+            confidence=0.6 if nlp_result else 0.3,
+            method_used="nlp_fallback" if nlp_result else "minimal",
+            processing_time=processing_time,
+            field_count=self._count_fields(nlp_result) if nlp_result else 0,
+            errors=errors
+        )
     
-    # Step 2: Pattern-based extraction using schema search terms
-    pattern_value = _extract_with_schema_patterns(search_terms, text, field_type)
-    if pattern_value is not None:
-        _cache_result(cache_key, pattern_value)
-        return pattern_value
-    
-    # Step 3: Fuzzy matching with schema terms
-    if RAPIDFUZZ_AVAILABLE:
-        fuzzy_value = _extract_with_schema_fuzzy_matching(search_terms, text, field_type)
-        if fuzzy_value is not None:
-            _cache_result(cache_key, fuzzy_value)
-            return fuzzy_value
-    
-    # Step 4: Basic string matching fallback
-    fallback_value = _extract_with_basic_schema_matching(search_terms, text, field_type)
-    _cache_result(cache_key, fallback_value)
-    return fallback_value
-
-
-def _get_field_info_from_schema(schema: Dict[str, Any], field_name: str, field_path: str = "") -> Optional[Dict[str, Any]]:
-    """Get field information from parsed TypeScript interface schema"""
-    if field_path:
-        # Navigate nested path (e.g., "identification.productName")
-        parts = field_path.split('.')
-        current = schema
-        for part in parts:
-            if isinstance(current, dict) and part in current:
-                current = current[part]
-            else:
-                return None
-        return current if isinstance(current, dict) and current.get("_field_name") == field_name else None
-    else:
-        # Search for field in schema
-        def _find_field_recursive(obj, target_field):
-            if isinstance(obj, dict):
-                for key, value in obj.items():
-                    if key == target_field and isinstance(value, dict) and value.get("_field_name"):
-                        return value
-                    elif isinstance(value, dict) and not key.startswith("_"):
-                        result = _find_field_recursive(value, target_field)
-                        if result:
-                            return result
+    def _extract_with_donut(self, pdf_path: str, interface_schema: Dict[str, Any], 
+                           page_num: int) -> Optional[Dict[str, Any]]:
+        """Extract using Donut visual document understanding."""
+        if not self.donut_processor:
             return None
         
-        return _find_field_recursive(schema, field_name)
-
-
-def _is_chemical_field_from_schema(field_info: Dict[str, Any], search_terms: List[str]) -> bool:
-    """Check if field is chemical-related based on schema metadata"""
-    field_name = field_info.get("_field_name", "").lower()
-    all_terms = " ".join(search_terms).lower()
-    
-    chemical_indicators = [
-        'cas', 'hazard', 'precautionary', 'signal', 'pictogram', 'concentration',
-        'boiling', 'melting', 'flash', 'molecular', 'formula', 'density', 'ph',
-        'toxicity', 'safety', 'ghs', 'reach', 'ec_number', 'physical_state',
-        'component', 'substance', 'ingredient', 'chemical'
-    ]
-    
-    return any(indicator in field_name or indicator in all_terms for indicator in chemical_indicators)
-
-
-def _extract_chemical_field_from_schema(field_info: Dict[str, Any], search_terms: List[str], text: str, field_type: str) -> Any:
-    """Extract chemical-specific field using NER and schema metadata"""
-    if not chemical_ner:
-        return None
-    
-    field_name = field_info.get("_field_name", "").lower()
-    chemical_info = chemical_ner.extract_chemical_info(text)
-    
-    # Enhanced field mapping using schema search terms
-    for term in search_terms:
-        term_lower = term.lower()
-        
-        # Direct CAS number mapping
-        if any(cas_term in term_lower for cas_term in ['cas', 'registry']):
-            cas_numbers = chemical_info.get('cas_numbers', [])
-            if cas_numbers:
-                return cas_numbers if field_type == "array" else cas_numbers[0]
-        
-        # EC number mapping
-        if any(ec_term in term_lower for ec_term in ['ec', 'einecs']):
-            ec_numbers = chemical_info.get('ec_numbers', [])
-            if ec_numbers:
-                return ec_numbers if field_type == "array" else ec_numbers[0]
-        
-        # Hazard statements mapping
-        if any(hazard_term in term_lower for hazard_term in ['hazard', 'h-statement', 'danger']):
-            hazard_statements = chemical_info.get('hazard_statements', [])
-            if hazard_statements:
-                return hazard_statements if field_type == "array" else hazard_statements[0]
-        
-        # Signal word mapping
-        if any(signal_term in term_lower for signal_term in ['signal', 'warning']):
-            signal_word = chemical_info.get('signal_word', '')
-            if signal_word:
-                return signal_word
-        
-        # Concentration mapping
-        if any(conc_term in term_lower for conc_term in ['concentration', 'percentage', 'content']):
-            concentrations = chemical_info.get('concentrations', [])
-            if concentrations:
-                return concentrations if field_type == "array" else concentrations[0]
-    
-    return None
-
-
-def _extract_with_schema_patterns(search_terms: List[str], text: str, field_type: str) -> Any:
-    """Extract using pre-compiled regex patterns with schema search terms"""
-    text_lower = text.lower()
-    
-    # Check each search term from schema
-    for term in search_terms:
-        term_lower = term.lower()
-        
-        # Try chemical patterns first if term suggests chemical data
-        for pattern_name, pattern in CHEMICAL_PATTERNS.items():
-            if any(keyword in term_lower for keyword in pattern_name.split('_')):
-                matches = pattern.findall(text)
-                if matches:
-                    if field_type == "array":
-                        return matches
-                    return matches[0]
-        
-        # Context-based extraction using schema terms
-        context_value = _extract_with_schema_context(term, text, field_type)
-        if context_value is not None:
-            return context_value
-    
-    return None
-
-
-def _extract_with_schema_context(search_term: str, text: str, field_type: str) -> Any:
-    """Extract value using contextual patterns with schema search term"""
-    # Common patterns for finding values after field names from schema
-    patterns = [
-        rf"{re.escape(search_term)}\s*:?\s*([^\n\r,;]+)",
-        rf"\b{re.escape(search_term)}\b\s*:?\s*([^\n\r,;]+)",
-        rf"{re.escape(search_term)}\s*[-=:]\s*([^\n\r,;]+)",
-        rf"^{re.escape(search_term)}\s*:?\s*([^\n\r]+)",
-    ]
-    
-    for pattern in patterns:
-        matches = re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE)
-        for match in matches:
-            value = match.group(1).strip()
-            if value and len(value) > 0:
-                return _convert_to_type(value, field_type)
-    
-    return None
-
-
-def _extract_with_schema_fuzzy_matching(search_terms: List[str], text: str, field_type: str) -> Any:
-    """Extract using rapidfuzz for fuzzy matching with schema terms"""
-    if not RAPIDFUZZ_AVAILABLE:
-        return None
-    
-    # Split text into chunks for better matching
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    
-    best_matches = []
-    for term in search_terms:
-        # Find the best matching lines using schema search terms
-        matches = process.extract(term, lines, limit=3, scorer=fuzz.partial_ratio)
-        for match, score in matches:
-            if score > 70:  # Threshold for good matches
-                best_matches.append((match, score, term))
-    
-    if not best_matches:
-        return None
-    
-    # Sort by score and try to extract value from best matches
-    best_matches.sort(key=lambda x: x[1], reverse=True)
-    
-    for match_line, score, term in best_matches:
-        # Try to extract value from the matched line
-        value = _extract_value_from_line(match_line, term, field_type)
-        if value is not None:
-            return value
-    
-    return None
-
-
-def _extract_with_basic_schema_matching(search_terms: List[str], text: str, field_type: str) -> Any:
-    """Basic string matching fallback using schema terms"""
-    text_lower = text.lower()
-    
-    for term in search_terms:
-        term_lower = term.lower()
-        
-        # Find term in text
-        index = text_lower.find(term_lower)
-        if index != -1:
-            # Extract context around the match
-            start = max(0, index - 50)
-            end = min(len(text), index + len(term) + 100)
-            context = text[start:end]
+        try:
+            print("🤖 Processing with Donut...")
+            donut_result = self.donut_processor.process_pdf_page(
+                pdf_path, 
+                page_num=page_num, 
+                timeout=self.config.donut_timeout
+            )
             
-            # Try to extract value from context
-            value = _extract_value_from_context(context, term, field_type)
-            if value is not None:
-                return value
-    
-    return None
-
-
-def _extract_value_from_line(line: str, search_term: str, field_type: str) -> Any:
-    """Extract value from a specific line using schema search term"""
-    # Remove the search term from the line to get the value
-    line_clean = line
-    line_clean = re.sub(rf"\b{re.escape(search_term)}\b", "", line_clean, flags=re.IGNORECASE)
-    
-    # Clean up the remaining text
-    line_clean = re.sub(r'^[:\-\s]*', '', line_clean)  # Remove leading separators
-    line_clean = re.sub(r'[:\-\s]*$', '', line_clean)  # Remove trailing separators
-    line_clean = line_clean.strip()
-    
-    if line_clean:
-        return _convert_to_type(line_clean, field_type)
-    
-    return None
-
-
-def _extract_value_from_context(context: str, search_term: str, field_type: str) -> Any:
-    """Extract value from surrounding context using schema search term"""
-    # Split context into parts and look for value after search term
-    parts = re.split(r'[:\-\n\r]', context)
-    
-    term_found = False
-    for part in parts:
-        part = part.strip()
-        if term_found and part:
-            return _convert_to_type(part, field_type)
-        if search_term.lower() in part.lower():
-            term_found = True
-            # Check if value is in the same part
-            remaining = part.lower().replace(search_term.lower(), '', 1).strip()
-            remaining = re.sub(r'^[:\-\s]*', '', remaining)
-            if remaining:
-                return _convert_to_type(remaining, field_type)
-    
-    return None
-
-
-def _extract_with_optimized_patterns(field_variants: List[str], text: str, field_type: str) -> Any:
-    """Extract using pre-compiled regex patterns"""
-    text_lower = text.lower()
-    
-    # Check each field variant
-    for variant in field_variants:
-        variant_lower = variant.lower()
-        
-        # Try chemical patterns first
-        for pattern_name, pattern in CHEMICAL_PATTERNS.items():
-            if pattern_name in variant_lower:
-                matches = pattern.findall(text)
-                if matches:
-                    if field_type == "array" or "[]" in field_type:
-                        return matches
-                    return matches[0]
-        
-        # Context-based extraction
-        context_value = _extract_with_context(variant, text, field_type)
-        if context_value is not None:
-            return context_value
-    
-    return None
-
-
-def _extract_with_context(field_name: str, text: str, field_type: str) -> Any:
-    """Extract value using contextual patterns"""
-    field_lower = field_name.lower()
-    
-    # Common patterns for finding values after field names
-    patterns = [
-        rf"{re.escape(field_name)}\s*:?\s*([^\n\r,;]+)",
-        rf"{re.escape(field_lower)}\s*:?\s*([^\n\r,;]+)",
-        rf"\b{re.escape(field_name)}\b\s*:?\s*([^\n\r,;]+)",
-        rf"\b{re.escape(field_lower)}\b\s*:?\s*([^\n\r,;]+)",
-    ]
-    
-    for pattern in patterns:
-        matches = re.finditer(pattern, text, re.IGNORECASE)
-        for match in matches:
-            value = match.group(1).strip()
-            if value and len(value) > 0:
-                return _convert_to_type(value, field_type)
-    
-    return None
-
-
-def _extract_with_rapidfuzz(field_variants: List[str], text: str, field_type: str) -> Any:
-    """Extract using rapidfuzz for fuzzy matching"""
-    if not RAPIDFUZZ_AVAILABLE:
-        return None
-    
-    # Split text into chunks for better matching
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    
-    best_matches = []
-    for variant in field_variants:
-        # Find the best matching lines
-        matches = process.extract(variant, lines, limit=3, scorer=fuzz.partial_ratio)
-        for match, score in matches:
-            if score > 70:  # Threshold for good matches
-                best_matches.append((match, score, variant))
-    
-    if not best_matches:
-        return None
-    
-    # Sort by score and try to extract value from best matches
-    best_matches.sort(key=lambda x: x[1], reverse=True)
-    
-    for match_line, score, variant in best_matches:
-        # Try to extract value from the matched line
-        value = _extract_value_from_line(match_line, variant, field_type)
-        if value is not None:
-            return value
-    
-    return None
-
-
-def _extract_value_from_line(line: str, field_name: str, field_type: str) -> Any:
-    """Extract value from a specific line"""
-    # Remove the field name from the line to get the value
-    line_clean = line
-    for pattern in [field_name, field_name.lower(), field_name.upper()]:
-        line_clean = re.sub(rf"\b{re.escape(pattern)}\b", "", line_clean, flags=re.IGNORECASE)
-    
-    # Clean up the remaining text
-    line_clean = re.sub(r'^[:\-\s]*', '', line_clean)  # Remove leading separators
-    line_clean = re.sub(r'[:\-\s]*$', '', line_clean)  # Remove trailing separators
-    line_clean = line_clean.strip()
-    
-    if line_clean:
-        return _convert_to_type(line_clean, field_type)
-    
-    return None
-
-
-def _extract_with_basic_matching(field_variants: List[str], text: str, field_type: str) -> Any:
-    """Basic string matching fallback"""
-    text_lower = text.lower()
-    
-    for variant in field_variants:
-        variant_lower = variant.lower()
-        
-        # Find variant in text
-        index = text_lower.find(variant_lower)
-        if index != -1:
-            # Extract context around the match
-            start = max(0, index - 50)
-            end = min(len(text), index + len(variant) + 100)
-            context = text[start:end]
+            if not donut_result or not donut_result.get('success'):
+                print(f"❌ Donut failed: {donut_result.get('error', 'Unknown error')}")
+                return None
             
-            # Try to extract value from context
-            value = _extract_value_from_context(context, variant, field_type)
-            if value is not None:
-                return value
+            donut_text = donut_result.get('structured_text', '')
+            print(f"📄 Donut extracted {len(donut_text)} characters")
+            
+            if len(donut_text) < 10:
+                print("⚠️ Donut extraction too short, likely incomplete")
+                return None
+            
+            # Process Donut output through dynamic field extraction
+            return self._process_donut_output(donut_text, interface_schema)
+            
+        except Exception as e:
+            print(f"❌ Donut extraction error: {e}")
+            return None
     
-    return None
+    def _process_donut_output(self, donut_text: str, interface_schema: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process Donut's structured text output using dynamic field mapping.
+        """
+        # Try to parse as JSON first (Donut sometimes outputs structured JSON)
+        json_result = self._try_parse_json(donut_text)
+        if json_result:
+            return self._map_json_to_schema(json_result, interface_schema)
+        
+        # Process as structured text with dynamic field extraction
+        return self._extract_from_structured_text(donut_text, interface_schema)
+    
+    def _try_parse_json(self, text: str) -> Optional[Dict[str, Any]]:
+        """Try to parse text as JSON."""
+        try:
+            # Clean up common Donut output issues
+            cleaned = text.strip()
+            if cleaned.startswith('<s>'):
+                cleaned = cleaned[3:]
+            if cleaned.endswith('</s>'):
+                cleaned = cleaned[:-4]
+            
+            # Try direct JSON parsing
+            return json.loads(cleaned)
+        except (json.JSONDecodeError, ValueError):
+            # Try to extract JSON from text
+            json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+            matches = re.findall(json_pattern, cleaned)
+            
+            for match in matches:
+                try:
+                    return json.loads(match)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            
+            return None
+    
+    def _map_json_to_schema(self, json_data: Dict[str, Any], 
+                           interface_schema: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Dynamically map JSON data to interface schema using intelligent field matching.
+        """
+        result = {}
+        
+        for field_name, field_info in interface_schema.items():
+            if field_name.startswith('_'):
+                continue
+            
+            # Get search terms for this field
+            search_terms = self._get_field_search_terms(field_name, field_info)
+            field_type = self._get_field_type(field_info)
+            
+            # Find best matching value in JSON
+            best_value = self._find_best_json_match(json_data, search_terms, field_type)
+            
+            if field_type == 'object' and isinstance(field_info, dict):
+                # Recursively process nested objects
+                nested_result = self._map_json_to_schema(best_value or {}, field_info)
+                result[field_name] = nested_result
+            elif field_type == 'array_of_objects' and isinstance(field_info, dict):
+                # Process array of objects
+                result[field_name] = self._extract_array_from_json(best_value, field_info)
+            else:
+                result[field_name] = best_value
+        
+        return result
+    
+    def _extract_from_structured_text(self, text: str, interface_schema: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract fields from structured text using dynamic pattern matching.
+        """
+        result = {}
+        
+        # Pre-process text for better extraction
+        processed_text = self._preprocess_text(text)
+        
+        for field_name, field_info in interface_schema.items():
+            if field_name.startswith('_'):
+                continue
+            
+            search_terms = self._get_field_search_terms(field_name, field_info)
+            field_type = self._get_field_type(field_info)
+            
+            if field_type == 'object' and isinstance(field_info, dict):
+                # Extract nested object
+                result[field_name] = self._extract_from_structured_text(processed_text, field_info)
+            elif field_type == 'array_of_objects':
+                # Extract array of objects
+                result[field_name] = self._extract_array_of_objects(processed_text, field_info)
+            elif field_type == 'array':
+                # Extract array of strings
+                result[field_name] = self._extract_array_field(processed_text, search_terms)
+            else:
+                # Extract simple field
+                result[field_name] = self._extract_simple_field(processed_text, search_terms, field_type)
+        
+        return result
+    
+    def _extract_hybrid(self, pdf_path: str, interface_schema: Dict[str, Any], 
+                       page_num: int, donut_result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """
+        Perform hybrid extraction combining Donut and NLP approaches.
+        """
+        # Extract raw text for NLP processing
+        raw_text = self._extract_pdf_text(pdf_path, page_num)
+        if not raw_text:
+            return donut_result
+        
+        # Perform NLP extraction
+        nlp_result = self._extract_with_nlp_text(raw_text, interface_schema)
+        
+        # Intelligently merge results
+        return self._merge_results(donut_result, nlp_result, interface_schema)
+    
+    def _extract_with_nlp(self, pdf_path: str, interface_schema: Dict[str, Any], 
+                         page_num: int) -> Optional[Dict[str, Any]]:
+        """Extract using NLP-based text processing."""
+        raw_text = self._extract_pdf_text(pdf_path, page_num)
+        if not raw_text:
+            return None
+        
+        return self._extract_with_nlp_text(raw_text, interface_schema)
+    
+    def _extract_with_nlp_text(self, text: str, interface_schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract fields from text using NLP processing."""
+        if not self.nlp_model:
+            # Fallback to regex-based extraction
+            return self._extract_with_regex(text, interface_schema)
+        
+        print("🧠 Processing with NLP...")
+        try:
+            doc = self.nlp_model(text)
+            return self._extract_with_spacy(doc, interface_schema)
+        except Exception as e:
+            print(f"❌ NLP processing error: {e}")
+            return self._extract_with_regex(text, interface_schema)
+    
+    def _extract_with_spacy(self, doc, interface_schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract fields using spaCy NLP processing."""
+        result = {}
+        
+        for field_name, field_info in interface_schema.items():
+            if field_name.startswith('_'):
+                continue
+            
+            search_terms = self._get_field_search_terms(field_name, field_info)
+            field_type = self._get_field_type(field_info)
+            
+            if field_type == 'object' and isinstance(field_info, dict):
+                result[field_name] = self._extract_with_spacy(doc, field_info)
+            elif field_type == 'array_of_objects':
+                result[field_name] = self._extract_array_with_nlp(doc, field_info)
+            elif field_type == 'array':
+                result[field_name] = self._extract_array_with_nlp_simple(doc, search_terms)
+            else:
+                result[field_name] = self._extract_field_with_nlp(doc, search_terms, field_type)
+        
+        return result
+    
+    def _extract_with_regex(self, text: str, interface_schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback regex-based extraction."""
+        result = {}
+        
+        for field_name, field_info in interface_schema.items():
+            if field_name.startswith('_'):
+                continue
+            
+            search_terms = self._get_field_search_terms(field_name, field_info)
+            field_type = self._get_field_type(field_info)
+            
+            if field_type == 'object' and isinstance(field_info, dict):
+                result[field_name] = self._extract_with_regex(text, field_info)
+            elif field_type == 'array_of_objects':
+                result[field_name] = self._extract_array_with_regex(text, field_info)
+            elif field_type == 'array':
+                result[field_name] = self._extract_array_with_regex_simple(text, search_terms)
+            else:
+                result[field_name] = self._extract_field_with_regex(text, search_terms, field_type)
+        
+        return result
+    
+    # Helper methods for dynamic field processing
+    
+    def _get_field_search_terms(self, field_name: str, field_info: Any) -> List[str]:
+        """Get search terms for a field based on interface structure."""
+        if isinstance(field_info, dict) and '_search_terms' in field_info:
+            return field_info['_search_terms']
+        
+        # Generate dynamic search terms based on field name
+        return self._generate_search_terms(field_name)
+    
+    def _get_field_type(self, field_info: Any) -> str:
+        """Get field type from interface info."""
+        if isinstance(field_info, dict):
+            return field_info.get('_type', 'string')
+        return 'string'
+    
+    @lru_cache(maxsize=128)
+    def _generate_search_terms(self, field_name: str) -> List[str]:
+        """Generate dynamic search terms for a field name."""
+        terms = [field_name]
+        
+        # Add variations
+        terms.extend([
+            field_name.lower(),
+            field_name.upper(),
+            field_name.replace('_', ' '),
+            field_name.replace('_', '-'),
+            re.sub(r'([A-Z])', r' \1', field_name).strip(),  # camelCase to words
+        ])
+        
+        # Add semantic variations based on common field patterns
+        semantic_map = {
+            'product': ['name', 'title', 'identifier', 'designation'],
+            'hazard': ['danger', 'warning', 'safety', 'risk'],
+            'signal': ['warning', 'danger'],
+            'cas': ['cas number', 'cas no', 'cas-no', 'registry number'],
+            'ingredient': ['component', 'substance', 'chemical'],
+            'percent': ['percentage', '%', 'concentration', 'amount'],
+        }
+        
+        for key, variations in semantic_map.items():
+            if key in field_name.lower():
+                terms.extend(variations)
+        
+        return list(set(terms))  # Remove duplicates
+    
+    def _preprocess_text(self, text: str) -> str:
+        """Preprocess text for better extraction."""
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Fix common OCR/extraction issues
+        text = text.replace('|', ' ')  # Table separators
+        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)  # Split joined words
+        
+        return text.strip()
+    
+    def _extract_pdf_text(self, pdf_path: str, page_num: int) -> Optional[str]:
+        """Extract raw text from PDF using pdfplumber."""
+        try:
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                if len(pdf.pages) > page_num:
+                    page = pdf.pages[page_num]
+                    return page.extract_text() or ""
+                return ""
+        except Exception as e:
+            print(f"❌ PDF text extraction error: {e}")
+            return None
+    
+    # Specific field extraction methods
+    
+    def _extract_simple_field(self, text: str, search_terms: List[str], field_type: str) -> Any:
+        """Extract a simple field value using dynamic search terms."""
+        # Try pattern-based extraction for specific field types
+        if 'cas' in str(search_terms).lower():
+            cas_match = self._extract_cas_number(text)
+            if cas_match:
+                return cas_match
+        
+        # Try fuzzy matching
+        best_value = self._extract_with_fuzzy_matching(text, search_terms)
+        
+        # Clean and format based on field type
+        if best_value:
+            return self._format_field_value(best_value, field_type)
+        
+        return None
+    
+    def _extract_array_field(self, text: str, search_terms: List[str]) -> List[str]:
+        """Extract array field values."""
+        results = []
+        
+        # Look for list patterns
+        list_patterns = [
+            r'^\s*[-*•]\s*(.+)$',  # Bullet points
+            r'^\s*\d+\.\s*(.+)$',  # Numbered lists
+            r'^\s*[a-z]\)\s*(.+)$',  # Letter lists
+        ]
+        
+        lines = text.split('\n')
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+            
+            # Check if line matches search terms
+            if self._line_matches_terms(line_clean, search_terms):
+                # Extract content from list items
+                content = line_clean
+                for pattern in list_patterns:
+                    match = re.match(pattern, line_clean)
+                    if match:
+                        content = match.group(1).strip()
+                        break
+                
+                if content and len(content) > 2:
+                    results.append(content)
+        
+        return results[:10]  # Limit results
+    
+    def _extract_array_of_objects(self, text: str, array_schema: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract array of objects dynamically."""
+        # Find sections that likely contain array data
+        sections = self._find_table_sections(text, array_schema)
+        
+        results = []
+        for section in sections:
+            obj = {}
+            for field_name, field_info in array_schema.items():
+                if field_name.startswith('_'):
+                    continue
+                
+                search_terms = self._get_field_search_terms(field_name, field_info)
+                field_type = self._get_field_type(field_info)
+                
+                value = self._extract_simple_field(section, search_terms, field_type)
+                if value:
+                    obj[field_name] = value
+            
+            if obj:
+                results.append(obj)
+        
+        return results
+    
+    def _find_table_sections(self, text: str, array_schema: Dict[str, Any]) -> List[str]:
+        """Find sections that contain tabular/array data."""
+        all_terms = []
+        for field_name, field_info in array_schema.items():
+            if not field_name.startswith('_'):
+                terms = self._get_field_search_terms(field_name, field_info)
+                all_terms.extend(terms)
+        
+        sections = []
+        lines = text.split('\n')
+        current_section = []
+        section_score = 0
+        
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                if current_section and section_score > 1:
+                    sections.append('\n'.join(current_section))
+                current_section = []
+                section_score = 0
+                continue
+            
+            # Score line based on relevant terms
+            line_score = sum(1 for term in all_terms 
+                           if self._fuzzy_match_score(term, line_clean) > 60)
+            
+            current_section.append(line_clean)
+            section_score += line_score
+            
+            # Individual high-scoring lines are also sections
+            if line_score >= 2:
+                sections.append(line_clean)
+        
+        if current_section and section_score > 1:
+            sections.append('\n'.join(current_section))
+        
+        return sections
+    
+    def _extract_cas_number(self, text: str) -> Optional[str]:
+        """Extract CAS numbers using pattern matching."""
+        patterns = [
+            r'\bCAS[:\s]*(\d{2,7}-\d{2}-\d)\b',
+            r'\b(\d{2,7}-\d{2}-\d)\b',
+            r'CAS\s*No\.?\s*:?\s*(\d{2,7}-\d{2}-\d)',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for cas in matches:
+                if self._validate_cas_number(cas):
+                    return cas
+        
+        return None
+    
+    def _validate_cas_number(self, cas: str) -> bool:
+        """Validate CAS number using check digit."""
+        if not re.match(r'^\d{2,7}-\d{2}-\d$', cas):
+            return False
+        
+        digits = cas.replace('-', '')
+        check_digit = int(digits[-1])
+        calculated = sum(int(d) * (i + 1) for i, d in enumerate(digits[-2::-1])) % 10
+        
+        return check_digit == calculated
+    
+    def _extract_with_fuzzy_matching(self, text: str, search_terms: List[str]) -> Optional[str]:
+        """Extract using fuzzy string matching."""
+        best_score = 0
+        best_value = None
+        
+        lines = text.split('\n')
+        for line in lines:
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+            
+            for term in search_terms:
+                score = self._fuzzy_match_score(term, line_clean)
+                if score > 70 and score > best_score:
+                    extracted = self._extract_value_from_line(line_clean, term)
+                    if extracted:
+                        best_score = score
+                        best_value = extracted
+        
+        return best_value
+    
+    def _fuzzy_match_score(self, term: str, text: str) -> float:
+        """Calculate fuzzy match score between term and text."""
+        return rapidfuzz.fuzz.partial_ratio(term.lower(), text.lower())
+    
+    def _extract_value_from_line(self, line: str, search_term: str) -> Optional[str]:
+        """Extract value from line containing search term."""
+        patterns = [
+            rf'{re.escape(search_term)}\s*[:\-]\s*(.+?)(?:\n|$)',
+            rf'{re.escape(search_term)}\s+(.+?)(?:\n|$)',
+            rf'(.+?)\s*[:\-]\s*{re.escape(search_term)}',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match:
+                value = match.group(1).strip()
+                return self._clean_extracted_value(value)
+        
+        return line.strip()
+    
+    def _clean_extracted_value(self, value: str) -> str:
+        """Clean extracted value."""
+        if not value:
+            return ""
+        
+        # Remove common prefixes/suffixes
+        value = re.sub(r'^[:\-\s]+|[:\-\s]+$', '', value)
+        value = re.sub(r'\s+', ' ', value)
+        
+        return value.strip()
+    
+    def _format_field_value(self, value: str, field_type: str) -> Any:
+        """Format value according to field type."""
+        if field_type == 'number':
+            number_match = re.search(r'(\d+(?:\.\d+)?)', value)
+            return float(number_match.group(1)) if number_match else value
+        elif field_type == 'boolean':
+            return value.lower() in ['true', 'yes', '1', 'on']
+        
+        return value
+    
+    def _line_matches_terms(self, line: str, search_terms: List[str]) -> bool:
+        """Check if line matches any search terms."""
+        return any(self._fuzzy_match_score(term, line) > 60 for term in search_terms)
+    
+    def _find_best_json_match(self, json_data: Dict[str, Any], 
+                             search_terms: List[str], field_type: str) -> Any:
+        """Find best matching value in JSON data."""
+        best_score = 0
+        best_value = None
+        
+        def search_recursive(obj, path=""):
+            nonlocal best_score, best_value
+            
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    for term in search_terms:
+                        score = self._fuzzy_match_score(term, key)
+                        if score > 70 and score > best_score:
+                            best_score = score
+                            best_value = value
+                    
+                    search_recursive(value, f"{path}.{key}")
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    search_recursive(item, f"{path}[{i}]")
+        
+        search_recursive(json_data)
+        return best_value
+    
+    def _extract_array_from_json(self, json_value: Any, array_schema: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract array of objects from JSON value."""
+        if not isinstance(json_value, list):
+            return []
+        
+        results = []
+        for item in json_value:
+            if isinstance(item, dict):
+                mapped_item = self._map_json_to_schema(item, array_schema)
+                if mapped_item:
+                    results.append(mapped_item)
+        
+        return results
+    
+    # NLP-specific extraction methods
+    
+    def _extract_field_with_nlp(self, doc, search_terms: List[str], field_type: str) -> Any:
+        """Extract field using spaCy NLP."""
+        # Use named entity recognition and pattern matching
+        for ent in doc.ents:
+            for term in search_terms:
+                if self._fuzzy_match_score(term, ent.text) > 70:
+                    return self._format_field_value(ent.text, field_type)
+        
+        # Fallback to sentence-level matching
+        for sent in doc.sents:
+            for term in search_terms:
+                if self._fuzzy_match_score(term, sent.text) > 60:
+                    extracted = self._extract_value_from_line(sent.text, term)
+                    if extracted:
+                        return self._format_field_value(extracted, field_type)
+        
+        return None
+    
+    def _extract_array_with_nlp(self, doc, array_schema: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract array of objects using NLP."""
+        # Find relevant sentences/sections
+        all_terms = []
+        for field_name, field_info in array_schema.items():
+            if not field_name.startswith('_'):
+                terms = self._get_field_search_terms(field_name, field_info)
+                all_terms.extend(terms)
+        
+        relevant_sents = []
+        for sent in doc.sents:
+            score = sum(1 for term in all_terms 
+                       if self._fuzzy_match_score(term, sent.text) > 60)
+            if score >= 2:
+                relevant_sents.append(sent.text)
+        
+        # Extract objects from relevant sentences
+        results = []
+        for sent_text in relevant_sents:
+            obj = {}
+            for field_name, field_info in array_schema.items():
+                if field_name.startswith('_'):
+                    continue
+                
+                search_terms = self._get_field_search_terms(field_name, field_info)
+                field_type = self._get_field_type(field_info)
+                
+                value = self._extract_simple_field(sent_text, search_terms, field_type)
+                if value:
+                    obj[field_name] = value
+            
+            if obj:
+                results.append(obj)
+        
+        return results
+    
+    def _extract_array_with_nlp_simple(self, doc, search_terms: List[str]) -> List[str]:
+        """Extract simple array using NLP."""
+        results = []
+        
+        for sent in doc.sents:
+            for term in search_terms:
+                if self._fuzzy_match_score(term, sent.text) > 60:
+                    results.append(sent.text.strip())
+                    break
+        
+        return results[:10]
+    
+    # Result processing and merging
+    
+    def _merge_results(self, donut_result: Optional[Dict[str, Any]], 
+                      nlp_result: Optional[Dict[str, Any]], 
+                      interface_schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Intelligently merge results from different extraction methods."""
+        if not donut_result and not nlp_result:
+            return self._create_empty_result(interface_schema)
+        
+        if not donut_result:
+            return nlp_result
+        
+        if not nlp_result:
+            return donut_result
+        
+        # Merge intelligently
+        merged = {}
+        for field_name, field_info in interface_schema.items():
+            if field_name.startswith('_'):
+                continue
+            
+            donut_value = donut_result.get(field_name)
+            nlp_value = nlp_result.get(field_name)
+            
+            # Choose better value based on completeness and quality
+            if self._is_better_value(donut_value, nlp_value):
+                merged[field_name] = donut_value
+            else:
+                merged[field_name] = nlp_value
+        
+        return merged
+    
+    def _is_better_value(self, value1: Any, value2: Any) -> bool:
+        """Determine if value1 is better than value2."""
+        if not value2:
+            return bool(value1)
+        if not value1:
+            return False
+        
+        # Convert to comparable format
+        str1 = str(value1).strip() if value1 else ""
+        str2 = str(value2).strip() if value2 else ""
+        
+        # Longer, more detailed values are generally better
+        if len(str1) > len(str2) * 1.5:
+            return True
+        
+        # Structured content is better
+        structure_score1 = str1.count(':') + str1.count('=') + str1.count('-')
+        structure_score2 = str2.count(':') + str2.count('=') + str2.count('-')
+        
+        return structure_score1 > structure_score2
+    
+    def _is_high_quality_result(self, result: Dict[str, Any], 
+                               interface_schema: Dict[str, Any]) -> bool:
+        """Check if result is high quality."""
+        field_count = self._count_fields(result)
+        total_fields = len([k for k in interface_schema.keys() if not k.startswith('_')])
+        
+        # High quality if we filled > 70% of fields
+        return field_count / max(total_fields, 1) > 0.7
+    
+    def _is_adequate_result(self, result: Dict[str, Any], 
+                           interface_schema: Dict[str, Any]) -> bool:
+        """Check if result is adequate."""
+        field_count = self._count_fields(result)
+        
+        # Adequate if we have at least 2 meaningful fields
+        return field_count >= 2
+    
+    def _count_fields(self, result: Dict[str, Any]) -> int:
+        """Count non-empty fields in result."""
+        count = 0
+        
+        def count_recursive(obj):
+            nonlocal count
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if not key.startswith('_'):
+                        if value and str(value).strip():
+                            count += 1
+                        count_recursive(value)
+            elif isinstance(obj, list):
+                if obj:
+                    count += 1
+                    for item in obj[:3]:  # Count first few items
+                        count_recursive(item)
+        
+        count_recursive(result)
+        return count
+    
+    def _create_empty_result(self, interface_schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Create empty result matching interface schema."""
+        result = {}
+        
+        for field_name, field_info in interface_schema.items():
+            if field_name.startswith('_'):
+                continue
+            
+            field_type = self._get_field_type(field_info)
+            
+            if field_type == 'object':
+                result[field_name] = self._create_empty_result(field_info)
+            elif field_type in ['array', 'array_of_objects']:
+                result[field_name] = []
+            else:
+                result[field_name] = None
+        
+        return result
 
 
-def _extract_value_from_context(context: str, field_name: str, field_type: str) -> Any:
-    """Extract value from surrounding context"""
-    # Split context into parts and look for value after field name
-    parts = re.split(r'[:\-\n\r]', context)
-    
-    field_found = False
-    for part in parts:
-        part = part.strip()
-        if field_found and part:
-            return _convert_to_type(part, field_type)
-        if field_name.lower() in part.lower():
-            field_found = True
-            # Check if value is in the same part
-            remaining = part.lower().replace(field_name.lower(), '', 1).strip()
-            remaining = re.sub(r'^[:\-\s]*', '', remaining)
-            if remaining:
-                return _convert_to_type(remaining, field_type)
-    
-    return None
+# Convenience functions for backward compatibility
 
-
-def _generate_field_variants(field_name: str) -> List[str]:
-    """Generate field name variants for better matching"""
-    variants = [field_name]
+def extract_fields_from_pdf_with_donut(pdf_path: str, interface_schema: Dict[str, Any], 
+                                      page_num: int = 0, timeout: int = 15) -> Dict[str, Any]:
+    """
+    Extract fields from PDF using modern Donut-first approach.
     
-    # Add common transformations
-    base_name = field_name.replace('_', ' ').replace('-', ' ')
-    variants.extend([
-        base_name,
-        base_name.title(),
-        base_name.upper(),
-        base_name.lower(),
-        field_name.replace('_', ''),
-        field_name.replace('_', '-'),
-        field_name.replace('_', ' ').title(),
-    ])
-    
-    # Add chemical-specific variants
-    chemical_variants = {
-        'cas_number': ['CAS No', 'CAS Number', 'CAS RN', 'CAS Registry Number'],
-        'ec_number': ['EC No', 'EC Number', 'EINECS Number'],
-        'signal_word': ['Signal Word', 'GHS Signal Word'],
-        'hazard_statement': ['Hazard Statement', 'H-Statement', 'H Statement'],
-        'precautionary_statement': ['Precautionary Statement', 'P-Statement', 'P Statement'],
-        'molecular_weight': ['Molecular Weight', 'Mol. Wt.', 'MW'],
-        'boiling_point': ['Boiling Point', 'BP', 'b.p.'],
-        'melting_point': ['Melting Point', 'MP', 'm.p.'],
-        'flash_point': ['Flash Point', 'FP'],
-        'physical_state': ['Physical State', 'Appearance', 'Form'],
-    }
-    
-    field_lower = field_name.lower()
-    for key, additional_variants in chemical_variants.items():
-        if key in field_lower:
-            variants.extend(additional_variants)
-    
-    return list(set(variants))  # Remove duplicates
+    Args:
+        pdf_path: Path to PDF file
+        interface_schema: Parsed TypeScript interface schema
+        page_num: Page number to process
+        timeout: Timeout for Donut processing
+        
+    Returns:
+        Extracted data dictionary
+    """
+    config = ExtractionConfig(donut_timeout=timeout)
+    extractor = DynamicExtractor(config)
+    result = extractor.extract_from_pdf(pdf_path, interface_schema, page_num)
+    return result.data
 
 
 def extract_fields_from_interface(text: str, interface_schema: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Extract all fields from text using TypeScript interface schema.
+    Extract fields from text using interface schema (backward compatibility).
     
     Args:
-        text: The PDF text to extract from
-        interface_schema: Parsed TypeScript interface schema
+        text: Text to extract from
+        interface_schema: Interface schema
         
     Returns:
-        Dictionary with extracted field values matching interface structure
+        Extracted data dictionary
     """
-    result = {}
-    
-    def _extract_recursive(schema_obj: Dict[str, Any], current_result: Dict[str, Any], path: str = ""):
-        """Recursively extract fields based on schema structure"""
-        for key, value in schema_obj.items():
-            if key.startswith("_"):  # Skip metadata
-                continue
-                
-            current_path = f"{path}.{key}" if path else key
-            
-            if isinstance(value, dict):
-                if value.get("_type") == "array_of_objects":
-                    # Handle array of objects
-                    array_items = extract_array_from_interface(text, value, current_path)
-                    current_result[key] = array_items
-                elif value.get("_field_name"):
-                    # This is a field definition
-                    field_value = extract_field_value(key, text, interface_schema, current_path)
-                    if field_value is not None:
-                        current_result[key] = field_value
-                else:
-                    # This is a nested object
-                    nested_result = {}
-                    _extract_recursive(value, nested_result, current_path)
-                    if nested_result:  # Only add if we found something
-                        current_result[key] = nested_result
-    
-    _extract_recursive(interface_schema, result)
-    return result
-
-
-def extract_array_from_interface(text: str, array_schema: Dict[str, Any], field_path: str) -> List[Dict[str, Any]]:
-    """
-    Extract array values using TypeScript interface schema.
-    
-    Args:
-        text: The text to search in
-        array_schema: Schema of array items from interface
-        field_path: Path to the array field
-        
-    Returns:
-        List of extracted objects matching array schema
-    """
-    # For now, return empty list - this would need more sophisticated
-    # table/structured data extraction logic
-    return []
-
-
-# Update the main conversion function to handle type conversion better
-def _convert_to_type(value: str, field_type: str) -> Any:
-    """Convert string value to appropriate type based on schema"""
-    if not value or not isinstance(value, str):
-        return value
-    
-    value = value.strip()
-    
-    # Handle array types
-    if field_type == "array":
-        # Split by common delimiters
-        items = re.split(r'[,;|\n]', value)
-        return [item.strip() for item in items if item.strip()]
-    
-    # Handle specific types
-    if field_type in ["number", "float"]:
-        try:
-            # Extract first number found
-            number_match = re.search(r'(\d+(?:\.\d+)?)', value)
-            if number_match:
-                return float(number_match.group(1))
-        except (ValueError, AttributeError):
-            pass
-    
-    elif field_type == "integer":
-        try:
-            # Extract first integer found
-            int_match = re.search(r'(\d+)', value)
-            if int_match:
-                return int(int_match.group(1))
-        except (ValueError, AttributeError):
-            pass
-    
-    elif field_type == "boolean":
-        value_lower = value.lower()
-        if value_lower in ['true', 'yes', '1', 'on', 'enabled']:
-            return True
-        elif value_lower in ['false', 'no', '0', 'off', 'disabled']:
-            return False
-    
-    # Return as string for everything else
-    return value
-
-
-def _cache_result(cache_key: str, result: Any) -> None:
-    """Cache extraction result"""
-    if len(_extraction_cache) >= _max_cache_size:
-        # Remove oldest entries
-        keys_to_remove = list(_extraction_cache.keys())[:100]
-        for key in keys_to_remove:
-            del _extraction_cache[key]
-    
-    _extraction_cache[cache_key] = result
-
-
-def extract_all_chemical_entities(text: str) -> Dict[str, Any]:
-    """Extract all chemical entities from text"""
-    if not chemical_ner:
-        return {}
-    
-    entities = chemical_ner.extract_chemical_info(text)
-    
-    # Add hazard classification if available
-    if hazard_classifier and entities.get('hazard_statements'):
-        hazard_analysis = hazard_classifier.get_hazard_category_summary(entities['hazard_statements'])
-        entities['hazard_analysis'] = hazard_analysis
-    
-    return entities
+    extractor = DynamicExtractor()
+    return extractor._extract_with_nlp_text(text, interface_schema) or {}
 
 
 def get_extraction_stats() -> Dict[str, Any]:
-    """Get extraction performance statistics"""
+    """Get extraction statistics."""
     return {
-        'cache_size': len(_extraction_cache),
-        'max_cache_size': _max_cache_size,
-        'rapidfuzz_available': RAPIDFUZZ_AVAILABLE,
-        'chemical_ner_available': CHEMICAL_NER_AVAILABLE,
-        'supported_patterns': list(CHEMICAL_PATTERNS.keys())
+        "note": "Statistics integrated into ExtractionResult objects",
+        "donut_available": DONUT_AVAILABLE,
+        "nlp_available": NLP_AVAILABLE
     }
-
-
-

@@ -1,9 +1,8 @@
 {
   "cache/32f8039ce01ecf92e1a4957d019741c0_a838fd8f3afc2ee58feb211806e2e93f.pkl": {
-    "created": 1751335494.614944,
+    "last_accessed": 1751337213.6510878,
     "pdf_path": "samples/sample.pdf",
-    "hits": 0,
-    "size_bytes": 635
+    "hits": 2
   },
   "cache/d5abfaeeb615f709ecb70affce130d7c_f7bfcd2d98ab2b0bf39e29ee8cf641b4.pkl": {
     "created": 1751335598.847428,
@@ -16,5 +15,21 @@
     "pdf_path": "samples/sample3.pdf",
     "hits": 0,
     "size_bytes": 571
+  },
+  "cache/32f8039ce01ecf92e1a4957d019741c0_5d91657a5aa5db10d10ddef8c9de8278.pkl": {
+    "last_accessed": 1751337203.085482,
+    "pdf_path": "samples/sample.pdf",
+    "hits": 1
+  },
+  "cache/32f8039ce01ecf92e1a4957d019741c0_70b3c23084c9beff9c634b276fb4719a.pkl": {
+    "last_accessed": 1751337191.817049,
+    "pdf_path": "samples/sample.pdf",
+    "hits": 1
+  },
+  "cache/32f8039ce01ecf92e1a4957d019741c0_4f3dbea85ef0fb419aaa2b037f3078df.pkl": {
+    "created": 1751337235.0791261,
+    "pdf_path": "samples/sample.pdf",
+    "hits": 0,
+    "size_bytes": 3933
   }
 }
