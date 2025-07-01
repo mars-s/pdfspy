@@ -331,17 +331,35 @@ def _score_extraction_context(match, text: str, field_name: str) -> float:
             score += 0.4
         elif re.match(r'^\d+$', extracted_value):  # Just numbers, less likely
             score += 0.1
+    elif 'ec' in field_lower and ('no' in field_lower or 'number' in field_lower):
+        # For EC numbers, look for the characteristic pattern XXX-XXX-X
+        if re.search(r'\d{3}-\d{3}-\d', extracted_value):
+            score += 0.4
+        elif re.match(r'^\d+$', extracted_value):  # Just numbers, less likely
+            score += 0.1
     elif 'chemical' in field_lower or 'name' in field_lower:
         # For chemical names, prefer text over numbers and give bonus for chemical-sounding words
         if not re.match(r'^\d+[-\d]*$', extracted_value):
             score += 0.3
         # Bonus for chemical-sounding words
-        chemical_words = ['sodium', 'hydrogen', 'carbonate', 'acid', 'oxide', 'chloride', 'sulfate', 'phosphate']
+        chemical_words = ['sodium', 'hydrogen', 'carbonate', 'acid', 'oxide', 'chloride', 'sulfate', 'phosphate', 
+                         'calcium', 'potassium', 'magnesium', 'aluminum', 'iron', 'copper', 'zinc', 'nitrogen',
+                         'phosphorus', 'sulfur', 'fluoride', 'bromide', 'iodide', 'nitrate', 'acetate']
         if any(word in extracted_value.lower() for word in chemical_words):
+            score += 0.5
+        
+        # Strong preference for longer chemical names (full IUPAC names are preferred)
+        name_length = len(extracted_value)
+        if name_length > 15:  # Very long names get highest bonus
+            score += 0.6
+        elif name_length > 10:  # Moderately long names
             score += 0.4
-        # Bonus for longer names (chemical names are typically longer)
-        if len(extracted_value) > 10:
+        elif name_length > 6:   # Short but reasonable names
             score += 0.2
+        
+        # Penalize very short names that are likely abbreviations or codes
+        if name_length <= 5:
+            score -= 0.3
     
     # Negative indicators
     if re.search(r'\b(title|header|caption|label)\b', context, re.IGNORECASE):
@@ -650,8 +668,11 @@ def _extract_vertical_table_data(lines: List[str], header_idx: int, field_names:
                 current_row[cas_field] = cas_match.group()
         
         elif re.search(r'\b\d{3}-\d{3}-\d\b', line):  # EC number pattern
-            # This is likely EC number, skip for now
-            continue
+            # Find EC field by looking for 'ec' in field name
+            ec_field = next((field for field in field_names if 'ec' in field.lower() and ('no' in field.lower() or 'number' in field.lower())), None)
+            if ec_field:
+                ec_match = re.search(r'\b\d{3}-\d{3}-\d\b', line)
+                current_row[ec_field] = ec_match.group()
             
         elif (not re.match(r'^\d+[-\d\s%]*$', line) and  # Not just numbers/percentages
               len(line) > 3 and
@@ -660,8 +681,10 @@ def _extract_vertical_table_data(lines: List[str], header_idx: int, field_names:
             name_field = next((field for field in field_names 
                              if any(pattern in field.lower() for pattern in ['chemical', 'component', 'substance', 'material']) 
                              and 'product' not in field.lower()), None)
-            if name_field and name_field not in current_row:
-                current_row[name_field] = line
+            if name_field:
+                # Prefer longer chemical names - replace if this one is longer
+                if name_field not in current_row or len(line) > len(current_row[name_field]):
+                    current_row[name_field] = line
     
     # Don't forget the last row
     if current_row and len(current_row) >= 2:
@@ -847,7 +870,10 @@ def _extract_from_table_structure(field_variants: List[str], text: str) -> Optio
                 
                 # Look for corresponding data in subsequent lines
                 # For table structures, data is usually within the next 10-15 lines
-                for j in range(i + 1, min(i + 15, len(lines))):
+                # Skip immediate next lines that might be other headers
+                start_search = i + 2 if i + 1 < len(lines) and any(header in lines[i + 1].lower() for header in ['ec-no', 'cas-no', 'weight', 'classification']) else i + 1
+                
+                for j in range(start_search, min(i + 15, len(lines))):
                     candidate_line = lines[j].strip()
                     
                     if candidate_line and _is_valid_data_candidate(candidate_line, variant):
@@ -865,11 +891,18 @@ def _extract_from_table_structure(field_variants: List[str], text: str) -> Optio
                                 return ec_match.group()
                         
                         elif 'chemical' in variant_lower or 'component' in variant_lower or 'name' in variant_lower:
-                            # For chemical names, look for text that's not numbers/codes
+                            # For chemical names, look for text that's not numbers/codes and prefer longer names
                             if (not re.match(r'^\d+[-\d]*$', candidate_line) and 
                                 len(candidate_line) > 3 and 
                                 not candidate_line.lower() in ['component', 'ec-no', 'cas-no', 'weight']):
-                                return candidate_line
+                                # Check if we need to combine with next line for full chemical name
+                                full_name = candidate_line
+                                if (j + 1 < len(lines) and 
+                                    lines[j + 1].strip() and 
+                                    not re.search(r'\d', lines[j + 1]) and  # Next line doesn't contain numbers
+                                    len(lines[j + 1].strip()) > 2):
+                                    full_name = candidate_line + " " + lines[j + 1].strip()
+                                return full_name
                         
                         else:
                             # For other fields, return first reasonable candidate
@@ -886,21 +919,48 @@ def _is_valid_data_candidate(line: str, field_variant: str) -> bool:
     line_lower = line.lower().strip()
     field_lower = field_variant.lower()
     
-    # Skip obvious headers
-    if line_lower in ['component', 'ec-no', 'cas-no', 'weight %', 'weight', 'classification', 'range']:
+    # Skip obvious headers and labels more comprehensively
+    header_patterns = [
+        'component', 'ec-no', 'cas-no', 'weight %', 'weight', 'classification', 'range',
+        'ec no', 'cas no', 'reach', 'registration', 'number', 'reg.', 'european community'
+    ]
+    if line_lower in header_patterns:
+        return False
+    
+    # Skip lines that contain classification references
+    if 'classification' in line_lower or '67/548' in line or '1272/2008' in line:
+        return False
+    
+    # Skip lines that are in parentheses (likely regulatory references)
+    if line.startswith('(') and line.endswith(')'):
+        return False
+    
+    # Skip lines that end with typical header indicators
+    if line_lower.endswith(('no.', 'no', 'number', '%', '-', 'reg.', 'reg')):
         return False
     
     # Skip lines that are just the field name
     if line_lower == field_lower:
         return False
     
-    # Skip very short lines unless they look like codes
+    # Skip very short lines unless they look like valid codes/numbers
     if len(line_lower) < 2:
         return False
     
-    # Skip lines that look like section headers
+    # Skip lines that look like section headers (e.g., "1.", "2.1", etc.)
     if re.match(r'^\d+\.', line_lower):
         return False
+    
+    # Skip lines that are mostly punctuation or formatting
+    if re.match(r'^[^\w\s]*$', line_lower):
+        return False
+    
+    # For chemical name fields, prefer lines that contain actual words, not just codes
+    if 'chemical' in field_lower or 'component' in field_lower or 'name' in field_lower:
+        # Should contain at least one alphabetic word longer than 2 characters
+        words = re.findall(r'[a-zA-Z]{3,}', line)
+        if not words:
+            return False
     
     return True
 

@@ -1,5 +1,5 @@
 interface SDSData {
   productName: string;
-  ChemicalName: string;
-  Cas_no: string;
+  cas_no: string;
+  concentration: string;
 }
