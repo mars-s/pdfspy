@@ -1,0 +1,20 @@
+{
+  "cache/32f8039ce01ecf92e1a4957d019741c0_a838fd8f3afc2ee58feb211806e2e93f.pkl": {
+    "created": 1751335494.614944,
+    "pdf_path": "samples/sample.pdf",
+    "hits": 0,
+    "size_bytes": 635
+  },
+  "cache/d5abfaeeb615f709ecb70affce130d7c_f7bfcd2d98ab2b0bf39e29ee8cf641b4.pkl": {
+    "created": 1751335598.847428,
+    "pdf_path": "samples/sample2.pdf",
+    "hits": 0,
+    "size_bytes": 913
+  },
+  "cache/61d42f937bb12b4f3574a6cac427cdda_f7bfcd2d98ab2b0bf39e29ee8cf641b4.pkl": {
+    "created": 1751335780.538156,
+    "pdf_path": "samples/sample3.pdf",
+    "hits": 0,
+    "size_bytes": 571
+  }
+}

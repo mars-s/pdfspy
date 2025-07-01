@@ -3,7 +3,7 @@ Streamlined schema mapping for TypeScript interface structures.
 Maps interface fields to extracted PDF data using intelligent field recognition.
 """
 from typing import Dict, Any, List, Union
-from .dynamic_extractor import extract_field_value, extract_array_values
+from .dynamic_extractor import extract_field_value, extract_array_from_interface, extract_fields_from_interface
 
 
 def map_schema_to_data(schema: Dict[str, Any], text: str) -> Dict[str, Any]:
@@ -32,17 +32,17 @@ def map_schema_to_data(schema: Dict[str, Any], text: str) -> Dict[str, Any]:
         
         elif field_type == 'array_of_objects':
             # Extract structured array data
-            array_data = extract_array_values(field_name, text, field_schema)
+            array_data = extract_array_from_interface(text, field_schema, field_name)
             result[field_name] = array_data
         
         elif field_type == 'array':
             # Extract simple array data
-            array_items = extract_array_values(field_name, text, field_schema)
+            array_items = extract_array_from_interface(text, field_schema, field_name)
             result[field_name] = array_items
         
         else:
             # Extract primitive values (string, number, boolean)
-            value = extract_field_value(field_name, text, field_type)
+            value = extract_field_value(field_name, text, schema, field_name)
             result[field_name] = value if value is not None else _get_default_value(field_type)
     
     return result
